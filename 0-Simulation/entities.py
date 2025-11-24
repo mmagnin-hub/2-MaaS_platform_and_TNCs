@@ -31,6 +31,16 @@ class Service(ABC):
         """Compute expected waiting time for a trip of given length."""
         raise NotImplementedError
 
+    def compute_utility(self, trip_length: float, value_time: float, value_wait: float) -> float:
+        """
+        Generic utility computation (can be overridden).
+        """
+        # Default behavior (valid for MT and MaaS)
+        fare = self.trip_fare(trip_length)
+        time = self.trip_time(trip_length)
+        wait = self.waiting_time(trip_length)  
+        return self.ASC - fare - value_time * time - value_wait * wait
+
 
 # --------------------------
 # TNC Service
@@ -55,11 +65,13 @@ class TNC(Service):
         self.capacity_ratio_to_MaaS = capacity_ratio_to_MaaS
         self.total_service_capacity = total_service_capacity
         
-        # self.wholesale_price = wholesale_price # not use now
-        # self.operating_cost = operating_cost # not use now
+        # Parameters for objective
+        self.wholesale_price = p_T          # wholesale price
+        self.operating_cost = u_T          # utility of vehicle capacity
         
         self.trip_length_per_traveler_type: list[float] | None = None 
         self.demand_per_traveler_type: list[float] | None = None 
+        self.value_waiting_time_per_traveler_type: list[float] | None = None 
         self.vacant_veh_available: float | None = None  
 
     def trip_fare(self, trip_length: float) -> float:
@@ -68,7 +80,7 @@ class TNC(Service):
     def trip_time(self, trip_length: float) -> float:
         return self.detour_ratio * trip_length / self.average_speed # hours
 
-    def waiting_time(self) -> float:
+    def waiting_time(self, trip_length = None) -> float:
         """
         A is a parameter that counts the exogenous factors in the matching process.
         A = 2.5 (Zhou et al. (2022), Competition ND third-party platform-integration in ride-sourcing markets. 
@@ -89,18 +101,102 @@ class TNC(Service):
         """
         total_demand = np.sum(np.array(self.trip_length_per_traveler_type) * np.array(self.demand_per_traveler_type))
         return ((1-self.capacity_ratio_to_MaaS) * self.total_service_capacity - total_demand) / self.average_veh_travel_dist_per_day
-
-    def compute_objective_function(self) -> float:
+    
+    def compute_objective_function(self, U: np.ndarray, service_index_T: int,
+                                   lambda_T: float) -> float:
         """
-        Compute operator objective function (e.g., profit).
-
-        Returns
-        -------
-        float
-            Objective value (e.g., profit in monetary units).
-        TODO: Use lagragian formulation ? 
+        Objective:
+        -f_T δ_T Σ l_i P_iT Q_i
+        - p_T y_T C_T
+        + u_T C_T
+        + λ_T ( l0T Σ P_iT Q_i - (1 - y_T) C_T )
         """
-        return
+        l = np.asarray(self.trip_length_per_traveler_type)
+        Q = np.asarray(self.demand_per_traveler_type)
+
+        # Softmax probabilities
+        P = np.exp(U)
+        P /= np.sum(P, axis=1, keepdims=True)
+        P_iT = P[:, service_index_T]   # Column for TNC
+
+        sum_l_PiT_Qi = np.sum(l * P_iT * Q)
+        sum_PiT_Qi   = np.sum(P_iT * Q)
+
+        # Build 4-term objective
+        term1 = -self.trip_fare * self.detour_ratio * sum_l_PiT_Qi
+        term2 = -self.wholesale_price * self.capacity_ratio_to_MaaS * self.total_service_capacity
+        term3 = self.operating_cost * self.total_service_capacity
+        term4 = lambda_T * (self.average_veh_travel_dist_per_day * sum_PiT_Qi - (1 - self.capacity_ratio_to_MaaS) * self.total_service_capacity)
+
+        return float(term1 + term2 + term3 + term4)
+    
+    def gradient_objective(
+            self,
+            U: np.ndarray,
+            service_index_T: int,
+            service_index_M: int,
+            lambda_T: float
+        ) -> np.ndarray:
+        """
+        Compute gradient of TNC objective wrt:
+        - f_T
+        - y_T   (capacity ratio to MaaS)
+        - lambda_T
+        
+        Returns:
+            grad_vector: ndarray shape (3,)
+        """
+
+        # 1) Extract demand inputs
+        l = np.asarray(self.trip_length_per_traveler_type)   # l_i
+        Q = np.asarray(self.demand_per_traveler_type)        # Q_i
+
+        # 2) Softmax for probabilities
+        expU = np.exp(U)
+        P = expU / np.sum(expU, axis=1, keepdims=True)
+
+        P_iT = P[:, service_index_T]    # Choice prob for TNC
+        P_iM = P[:, service_index_M]    # for MT (needed in y_T gradient)
+
+        # 3) Partial derivatives of utility:
+        #    dU_iT / df_T  = - (trip_fare wrt f_T) = - (detour * l_i)
+        dUdf = -self.detour_ratio * l         # shape (I,)
+
+        #    dU_iT / dy_T = - d(wait_time)/dy_T * (value_wait)
+        #    waiting_time = A * vacant^{-s}
+        A, s = 2.5, 0.5
+        vacant = self.find_vacant_veh_available()
+
+        dUdy = - self.value_waiting_time_per_traveler_type * s * A * (vacant)**(-(s + 1)) * (self.total_service_capacity /
+                    self.average_veh_travel_dist_per_day)
+
+        # 4) Terms needed for gradient
+        sum_l_PiT_Qi = np.sum(l * P_iT * Q)
+        sum_PiT_Qi   = np.sum(P_iT * Q)
+
+        # ========= GRAD w.r.t. f_T ==========
+        grad_fT = (
+            -self.detour_ratio * sum_l_PiT_Qi
+            - self.trip_fare * self.detour_ratio * np.sum(l * Q * P_iT * (1 - P_iT) * dUdf)
+            + lambda_T * self.average_veh_travel_dist_per_day * np.sum(Q * P_iT * (1 - P_iT) * dUdf)
+        )
+
+        # ========= GRAD w.r.t. y_T ==========
+        grad_yT = (
+            -self.trip_fare * self.detour_ratio * np.sum(l * Q * P_iT *
+                ((1 - P_iT) * dUdy - P_iM * dUdy))  # P_iM term included
+            - self.trip_fare * self.total_service_capacity
+            + lambda_T * self.average_veh_travel_dist_per_day * np.sum(Q * P_iT *
+                ((1 - P_iT) * dUdy - P_iM * dUdy))
+            + lambda_T * self.total_service_capacity
+        )
+
+        # ========= GRAD w.r.t. λ_T ==========
+        grad_lambdaT = self.average_veh_travel_dist_per_day * sum_PiT_Qi - (1 - self.capacity_ratio_to_MaaS) * self.total_service_capacity
+
+        return np.array([grad_fT, grad_yT, grad_lambdaT])
+
+
 
     def optimize(self):
         """
@@ -257,33 +353,23 @@ class Travelers:
         self.utilities: list[float] | None = None
         self.travelers_per_service: list[float] | None = None
 
-    def compute_utilities(self, services: list[Service]) -> None: 
-        '''
-        Compute the utility of each service for this traveler group.
-        '''
-        
+    def compute_utilities(self, services: list[Service]) -> None:
         if not self.utilities:
             self.utilities = [0]*len(services)
 
         for idx, service in enumerate(services):
-            asc = service.ASC
-            fare = service.trip_fare(self.trip_length)
-            time = service.trip_time(self.trip_length)
-            if service.name == "TNC":
-                wait = service.waiting_time()
-            else:
-                wait = service.waiting_time(self.trip_length)
-            U = asc - fare - self.value_time * time - self.value_wait * wait
-            self.utilities[idx] = 0.5 * (self.utilities[idx] + U)  # smoothing 
-
-            # Print debug info
-            print(
-            f"{service.name}: "
-            f"trip_length={self.trip_length:.4f}, value_time={self.value_time:.4f}, "
-            f"value_wait={self.value_wait:.4f}, U={U:.4f}, "
-            f"fare={fare:.4f}, time={time:.4f}, wait={wait:.4f}"
+            U = service.compute_utility(
+                trip_length=self.trip_length,
+                value_time=self.value_time,
+                value_wait=self.value_wait,
             )
-        return
+            self.utilities[idx] = 0.5 * (self.utilities[idx] + U)  # smoothing
+
+            print(
+                f"{service.name}: trip_length={self.trip_length:.4f}, "
+                f"value_time={self.value_time:.4f}, value_wait={self.value_wait:.4f}, "
+                f"U={U:.4f}"
+            )
     
     def choose_service(self, services: list[Service]) -> None:
         '''
@@ -293,13 +379,6 @@ class Travelers:
         exp_utilities = np.exp(self.utilities) 
         probabilities = exp_utilities / np.sum(exp_utilities)
         self.travelers_per_service = probabilities * self.number_traveler 
-        '''
-        Here I could smooth too:
-        self.travelers_per_service = (
-            0.5 * self.travelers_per_service + 
-            0.5 * probabilities * self.number_traveler
-        )
-        '''
         return
 
 # --------------------------

@@ -62,7 +62,9 @@ def main():
     
     # Pass trip info to services (km)
     tnc.trip_length_per_traveler_type = [traveler.trip_length for traveler in travelers] 
+    tnc.value_waiting_time_per_traveler_type = [traveler.value_wait for traveler in travelers]
     maas.trip_length_per_traveler_type = [traveler.trip_length for traveler in travelers] 
+    maas.value_waiting_time_per_traveler_type = [traveler.value_wait for traveler in travelers]
 
     tnc.ASC = 1.0     
     mt.ASC = 0.0
@@ -80,11 +82,6 @@ def main():
     allocation_history = {service.name: [] for service in services}
     # Per traveler type per service
     allocation_by_type = {service.name: [[] for _ in travelers] for service in services}
-
-    # TODO:
-    # calculate the gradient for tnc and maas (on latex)
-    # autograd (application) compare with my version
-    # check some paper on nash equi (gradient descente)
 
     # --------------------------
     # 4. Simulation loop
