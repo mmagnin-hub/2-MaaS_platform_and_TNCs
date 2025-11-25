@@ -11,10 +11,8 @@ class Service(ABC):
     Abstract base class representing a generic transportation service.
     """
 
-    def __init__(self, name: str, ASC: float, fare: float):
+    def __init__(self, name: str):
         self.name = name
-        self.ASC = ASC
-        self.fare = fare
 
     @abstractmethod
     def trip_fare(self, trip_length: float) -> float:
@@ -40,7 +38,10 @@ class Service(ABC):
         time = self.trip_time(trip_length)
         wait = self.waiting_time(trip_length)  
         return self.ASC - fare - value_time * time - value_wait * wait
-
+    
+    def get_allocation(self, allocation: dict[str, list[float]]) -> None:
+        self.demand_per_traveler_type = allocation
+        return
 
 # --------------------------
 # TNC Service
@@ -52,13 +53,19 @@ class TNC(Service):
     """
 
     def __init__(self,
+                 ASC: float,
+                 fare: float,
                  detour_ratio: float,
                  average_speed: float,
                  average_veh_travel_dist_per_day: float,
                  capacity_ratio_to_MaaS: float,
-                 total_service_capacity: float,):
-        super().__init__(name="TNC", ASC=0.0, fare=0.0)  # placeholder values; !! CHANGE THEM !!
-
+                 total_service_capacity: float,
+                 cost_purchasing_capacity_TNC: float,
+                 operating_cost: float):
+        super().__init__(name="TNC") 
+        
+        self.ASC = ASC
+        self.fare = fare
         self.detour_ratio = detour_ratio
         self.average_speed = average_speed
         self.average_veh_travel_dist_per_day = average_veh_travel_dist_per_day
@@ -66,11 +73,12 @@ class TNC(Service):
         self.total_service_capacity = total_service_capacity
         
         # Parameters for objective
-        self.wholesale_price = p_T          # wholesale price
-        self.operating_cost = u_T          # utility of vehicle capacity
+        self.cost_purchasing_capacity_TNC = cost_purchasing_capacity_TNC         
+        self.operating_cost = operating_cost   
+        self.lambda_T = 0      
         
         self.trip_length_per_traveler_type: list[float] | None = None 
-        self.demand_per_traveler_type: list[float] | None = None 
+        self.demand_per_traveler_type: dict[str, list[float]] = None
         self.value_waiting_time_per_traveler_type: list[float] | None = None 
         self.vacant_veh_available: float | None = None  
 
@@ -99,22 +107,14 @@ class TNC(Service):
         """
         Compute the number of idle vehicles in the TNC fleet (in veh per day).
         """
-        total_demand = np.sum(np.array(self.trip_length_per_traveler_type) * np.array(self.demand_per_traveler_type))
+        total_demand = np.sum(np.array(self.trip_length_per_traveler_type) * np.array(self.demand_per_traveler_type[self.name])) 
         return ((1-self.capacity_ratio_to_MaaS) * self.total_service_capacity - total_demand) / self.average_veh_travel_dist_per_day
     
-    def compute_objective_function(self, U: np.ndarray, service_index_T: int,
-                                   lambda_T: float) -> float:
-        """
-        Objective:
-        -f_T δ_T Σ l_i P_iT Q_i
-        - p_T y_T C_T
-        + u_T C_T
-        + λ_T ( l0T Σ P_iT Q_i - (1 - y_T) C_T )
-        """
+    def compute_objective_function(self, U: np.ndarray, service_index_T: int = 0) -> float:
         l = np.asarray(self.trip_length_per_traveler_type)
-        Q = np.asarray(self.demand_per_traveler_type)
+        Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0) 
 
-        # Softmax probabilities
+        # get P_im from U_im
         P = np.exp(U)
         P /= np.sum(P, axis=1, keepdims=True)
         P_iT = P[:, service_index_T]   # Column for TNC
@@ -123,19 +123,18 @@ class TNC(Service):
         sum_PiT_Qi   = np.sum(P_iT * Q)
 
         # Build 4-term objective
-        term1 = -self.trip_fare * self.detour_ratio * sum_l_PiT_Qi
-        term2 = -self.wholesale_price * self.capacity_ratio_to_MaaS * self.total_service_capacity
+        term1 = -self.fare * self.detour_ratio * sum_l_PiT_Qi
+        term2 = -self.cost_purchasing_capacity_TNC * self.capacity_ratio_to_MaaS * self.total_service_capacity
         term3 = self.operating_cost * self.total_service_capacity
-        term4 = lambda_T * (self.average_veh_travel_dist_per_day * sum_PiT_Qi - (1 - self.capacity_ratio_to_MaaS) * self.total_service_capacity)
+        term4 = self.lambda_T * (self.average_veh_travel_dist_per_day * sum_PiT_Qi - (1 - self.capacity_ratio_to_MaaS) * self.total_service_capacity)
 
         return float(term1 + term2 + term3 + term4)
     
     def gradient_objective(
             self,
             U: np.ndarray,
-            service_index_T: int,
-            service_index_M: int,
-            lambda_T: float
+            service_index_T: int = 0,
+            service_index_M: int = 2
         ) -> np.ndarray:
         """
         Compute gradient of TNC objective wrt:
@@ -147,48 +146,45 @@ class TNC(Service):
             grad_vector: ndarray shape (3,)
         """
 
-        # 1) Extract demand inputs
-        l = np.asarray(self.trip_length_per_traveler_type)   # l_i
-        Q = np.asarray(self.demand_per_traveler_type)        # Q_i
-
-        # 2) Softmax for probabilities
-        expU = np.exp(U)
-        P = expU / np.sum(expU, axis=1, keepdims=True)
+        # Extract demand inputs
+        l = np.asarray(self.trip_length_per_traveler_type)   # l_i    
+        Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0)  # Q_i
+        
+        # Softmax for probabilities
+        P = np.exp(U)
+        P /= np.sum(P, axis=1, keepdims=True)
 
         P_iT = P[:, service_index_T]    # Choice prob for TNC
         P_iM = P[:, service_index_M]    # for MT (needed in y_T gradient)
 
-        # 3) Partial derivatives of utility:
-        #    dU_iT / df_T  = - (trip_fare wrt f_T) = - (detour * l_i)
-        dUdf = -self.detour_ratio * l         # shape (I,)
+        # Partial derivatives of utility:
+        dUdf = -self.detour_ratio * l     
 
-        #    dU_iT / dy_T = - d(wait_time)/dy_T * (value_wait)
-        #    waiting_time = A * vacant^{-s}
         A, s = 2.5, 0.5
         vacant = self.find_vacant_veh_available()
 
-        dUdy = - self.value_waiting_time_per_traveler_type * s * A * (vacant)**(-(s + 1)) * (self.total_service_capacity /
+        dUdy = - np.asarray(self.value_waiting_time_per_traveler_type) * s * A * (vacant)**(-(s + 1)) * (self.total_service_capacity /
                     self.average_veh_travel_dist_per_day)
 
-        # 4) Terms needed for gradient
+        # Terms needed for gradient
         sum_l_PiT_Qi = np.sum(l * P_iT * Q)
         sum_PiT_Qi   = np.sum(P_iT * Q)
 
         # ========= GRAD w.r.t. f_T ==========
         grad_fT = (
             -self.detour_ratio * sum_l_PiT_Qi
-            - self.trip_fare * self.detour_ratio * np.sum(l * Q * P_iT * (1 - P_iT) * dUdf)
-            + lambda_T * self.average_veh_travel_dist_per_day * np.sum(Q * P_iT * (1 - P_iT) * dUdf)
+            - self.fare * self.detour_ratio * np.sum(l * Q * P_iT * (1 - P_iT) * dUdf)
+            + self.lambda_T * self.average_veh_travel_dist_per_day * np.sum(Q * P_iT * (1 - P_iT) * dUdf)
         )
 
         # ========= GRAD w.r.t. y_T ==========
         grad_yT = (
-            -self.trip_fare * self.detour_ratio * np.sum(l * Q * P_iT *
-                ((1 - P_iT) * dUdy - P_iM * dUdy))  # P_iM term included
-            - self.trip_fare * self.total_service_capacity
-            + lambda_T * self.average_veh_travel_dist_per_day * np.sum(Q * P_iT *
+            -self.fare * self.detour_ratio * np.sum(l * Q * P_iT *
+                ((1 - P_iT) * dUdy - P_iM * dUdy))  
+            - self.fare * self.total_service_capacity
+            + self.lambda_T * self.average_veh_travel_dist_per_day * np.sum(Q * P_iT *
                 ((1 - P_iT) * dUdy - P_iM * dUdy))
-            + lambda_T * self.total_service_capacity
+            + self.lambda_T * self.total_service_capacity
         )
 
         # ========= GRAD w.r.t. λ_T ==========
@@ -209,10 +205,6 @@ class TNC(Service):
         """
         return
 
-    def get_allocation(self, allocation: dict[str, list[float]]) -> None:
-        self.demand_per_traveler_type = allocation[self.name]
-        return
-
 # --------------------------
 # Mass Transit Service
 # --------------------------
@@ -223,12 +215,17 @@ class MT(Service):
     """
 
     def __init__(self,
+                 ASC: float,
+                 fare: float,
                  n_transfer_per_length: float,
                  detour_ratio: float,
                  average_speed: float,
                  access_time: float,
                  transit_time: float):
-        super().__init__(name="MT", ASC=0.0, fare=0.0)  # placeholder values; !! CHANGE THEM !!
+        super().__init__(name="MT") 
+        
+        self.ASC = ASC
+        self.fare = fare
         self.n_transfer_per_length = n_transfer_per_length
         self.detour_ratio = detour_ratio 
         self.average_speed = average_speed
@@ -255,30 +252,39 @@ class MaaS(Service):
     """
 
     def __init__(self,
+                 ASC: float,
+                 fare: float,
                  share_TNC: float,
                  detour_ratio_TNC: float,
                  average_speed_TNC: float,
-                 capacity_ratio_to_MaaS: float,
+                 capacity_ratio_from_TNC: float,
                  total_service_capacity_TNC: float,
                  average_veh_travel_dist_per_day_TNC: float,
+                 cost_purchasing_capacity_TNC: float,
                  detour_ratio_MT: float,
                  average_speed_MT: float,
                  transit_time_MT: float,
-                 n_transfer_per_length_MT: float):
-        super().__init__(name="MaaS", ASC=0.0, fare=0.0)  # placeholder values; !! CHANGE THEM !!
+                 n_transfer_per_length_MT: float,
+                 cost_purchasing_capacity_MT: float):
+        super().__init__(name="MaaS") 
 
-        # Share between sub-services
+        self.ASC = ASC
+        self.fare = fare
         self.share_TNC = share_TNC
-
+        self.lambda_M = 0
+        
         # TNC parameters
         self.detour_ratio_TNC = detour_ratio_TNC
         self.average_speed_TNC = average_speed_TNC
-        self.capacity_ratio_to_MaaS = capacity_ratio_to_MaaS
+        self.capacity_ratio_from_TNC = capacity_ratio_from_TNC
         self.total_service_capacity_TNC = total_service_capacity_TNC
         self.average_veh_travel_dist_per_day_TNC = average_veh_travel_dist_per_day_TNC
+        self.cost_purchasing_capacity_TNC = cost_purchasing_capacity_TNC
 
         self.trip_length_per_traveler_type: list[float] | None = None 
-        self.demand_per_traveler_type: list[float] | None = None 
+        self.value_travel_time_per_traveler_type: list[float] | None = None 
+        self.value_waiting_time_per_traveler_type: list[float] | None = None
+        self.demand_per_traveler_type: dict[str, list[float]] = None
         self.vacant_veh_available: float | None = None  
 
         # MT parameters
@@ -286,6 +292,7 @@ class MaaS(Service):
         self.average_speed_MT = average_speed_MT
         self.transit_time_MT = transit_time_MT
         self.n_transfer_per_length_MT = n_transfer_per_length_MT
+        self.cost_purchasing_capacity_MT = cost_purchasing_capacity_MT
 
     def trip_fare(self, trip_length: float) -> float:
         return self.fare * trip_length
@@ -317,9 +324,93 @@ class MaaS(Service):
         """
         Compute the number of idle vehicles in the MaaS fleet (in veh per day).
         """
-        total_demand = self.share_TNC * np.sum(np.array(self.trip_length_per_traveler_type) * np.array(self.demand_per_traveler_type)) 
-        return (self.capacity_ratio_to_MaaS * self.total_service_capacity_TNC - total_demand) / self.average_veh_travel_dist_per_day_TNC
-    
+        total_demand = self.share_TNC * np.sum(np.array(self.trip_length_per_traveler_type) * np.array(self.demand_per_traveler_type[self.name])) # MM : demand per traveler type for MaaS !!!
+        return (self.capacity_ratio_from_TNC * self.total_service_capacity_TNC - total_demand) / self.average_veh_travel_dist_per_day_TNC
+
+    def compute_objective_function(self, U: np.ndarray, service_index_M: int = 2) -> float:
+        l = np.asarray(self.trip_length_per_traveler_type)
+        Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0) 
+
+        # get P_im from U_im
+        P = np.exp(U)
+        P /= np.sum(P, axis=1, keepdims=True)
+        P_iM = P[:, service_index_M]   # Column for MaaS
+
+        sum_l_PiM_Qi = np.sum(l * P_iM * Q)
+        sum_PiM_Qi   = np.sum(P_iM * Q)
+
+        # Build 4-term objective
+        term1 = -self.fare * sum_l_PiM_Qi
+        term2 = self.cost_purchasing_capacity_MT * (1 - self.share_TNC) * sum_PiM_Qi
+        term3 = self.cost_purchasing_capacity_TNC * self.capacity_ratio_from_TNC * self.total_service_capacity_TNC
+        term4 = self.lambda_M * (self.share_TNC * sum_PiM_Qi -  self.capacity_ratio_from_TNC * self.total_service_capacity_TNC)
+
+        return float(term1 + term2 + term3 + term4)
+
+    def gradient_objective(
+            self,
+            U: np.ndarray,
+            service_index_T: int = 0,
+            service_index_M: int = 2
+        ) -> np.ndarray:
+        """
+        Compute gradient of MaaS objective wrt:
+        - f_M
+        - p_T
+        - alpha (share_TNC)
+        - lambda_M
+        
+        Returns:
+            grad_vector: ndarray shape (4,)
+        """
+
+        # Extract demand inputs
+        l = np.asarray(self.trip_length_per_traveler_type)   # l_i    
+        Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0)  # Q_i
+        
+        # Softmax for probabilities
+        P = np.exp(U)
+        P /= np.sum(P, axis=1, keepdims=True)
+
+        P_iM = P[:, service_index_M]  
+
+        # Terms needed for gradient
+        sum_l_PiM_Qi = np.sum(l * P_iM * Q)
+        sum_PiM_Qi   = np.sum(P_iM * Q) 
+
+        # Partial derivatives of utility:
+        dUdf = - l     
+
+        A, s = 2.5, 0.5
+        vacant = self.find_vacant_veh_available()
+
+
+        dUdalph = - np.asarray(self.value_travel_time_per_traveler_type) * (self.detour_ratio_TNC / self.average_speed_TNC * l - self.detour_ratio_MT / self.average_speed_MT * l) \
+                  - np.asarray(self.value_waiting_time_per_traveler_type) * (s * A * (vacant)**(-(s + 1)) * (sum_l_PiM_Qi /
+                    self.average_veh_travel_dist_per_day_TNC) - self.transit_time_MT * self.n_transfer_per_length_MT * l)
+
+        # ========= GRAD w.r.t. f_M ==========
+        grad_fM = (
+            - sum_l_PiM_Qi
+            - self.fare * np.sum(l * Q * P_iM * (1 - P_iM) * dUdf)
+            + (self.cost_purchasing_capacity_MT * (1 - self.share_TNC) + self.lambda_M * self.share_TNC) * np.sum(Q * P_iM * (1 - P_iM) * dUdf)
+        )
+
+        # ========= GRAD w.r.t. p_T ==========
+        grad_pT = self.capacity_ratio_from_TNC * self.total_service_capacity_TNC
+
+        # ========= GRAD w.r.t. alpha ========
+        grad_alpha = (- self.fare * np.sum(l * Q * P_iM * (1 - P_iM) * dUdalph)
+                      + (self.lambda_M - self.cost_purchasing_capacity_MT) * sum_PiM_Qi
+                      + (self.cost_purchasing_capacity_MT * (1 - self.share_TNC) + self.lambda_M * self.share_TNC) 
+                      * (np.sum(Q * P_iM * (1 - P_iM) * dUdalph))
+        )
+
+        # ========= GRAD w.r.t. λ_M ==========
+        grad_lambdaM = self.share_TNC * sum_PiM_Qi - self.capacity_ratio_from_TNC * self.total_service_capacity_TNC
+
+        return np.array([grad_fM, grad_pT ,grad_alpha, grad_lambdaM])
+
     def optimize(self):
         """
         Optimize MaaS parameters:
@@ -329,10 +420,6 @@ class MaaS(Service):
         - MT capacity usage
         TODO: Define MaaS optimization logic.
         """
-        return
-    
-    def get_allocation(self, allocation: dict[str, list[float]]) -> None:
-        self.demand_per_traveler_type = allocation[self.name]
         return
 
 # --------------------------
@@ -365,11 +452,12 @@ class Travelers:
             )
             self.utilities[idx] = 0.5 * (self.utilities[idx] + U)  # smoothing
 
-            print(
-                f"{service.name}: trip_length={self.trip_length:.4f}, "
-                f"value_time={self.value_time:.4f}, value_wait={self.value_wait:.4f}, "
-                f"U={U:.4f}"
-            )
+            # print(
+            #     f"{service.name}: trip_length={self.trip_length:.4f}, "
+            #     f"value_time={self.value_time:.4f}, value_wait={self.value_wait:.4f}, "
+            #     f"U={U:.4f}"
+            # )
+        return
     
     def choose_service(self, services: list[Service]) -> None:
         '''
