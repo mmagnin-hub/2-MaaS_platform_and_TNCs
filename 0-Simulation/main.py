@@ -47,7 +47,16 @@ def main():
     number_days = 50
 
     # --------------------------
-    # 1. Define services
+    # 1. Define traveler groups
+    # --------------------------
+    travelers = [
+        Travelers(number_traveler=200, trip_length=30, value_time=25, value_wait=25), # count, km, monetary unit/h, monetary unit/h
+        Travelers(number_traveler=150, trip_length=10, value_time=25, value_wait=25),
+        Travelers(number_traveler=100, trip_length=5, value_time=25, value_wait=25)
+    ]
+
+    # --------------------------
+    # 2. Define services
     # --------------------------
     tnc = TNC(
         ASC=1.0, 
@@ -57,6 +66,8 @@ def main():
         average_veh_travel_dist_per_day=8*40, # 320 km per veh per day
         capacity_ratio_to_MaaS=0.4, # TNC gives 40% of its capacity to MaaS
         total_service_capacity=32000, # in veh * km per day
+        trip_length_per_traveler_type=[traveler.trip_length for traveler in travelers], # km
+        value_waiting_time_per_traveler_type=[traveler.value_wait for traveler in travelers], # monetary units per time
         cost_purchasing_capacity_TNC= 100, # monetary units per veh (MM : check this value later)
         operating_cost= 90 # monetary units per veh (MM : check this value later)
     )
@@ -70,7 +81,7 @@ def main():
         access_time=1/6, # hours
         transit_time=1/12 # hours
     )
-    
+
     maas = MaaS(
         ASC=0.5, 
         fare=1.05 * (0.2 * tnc.fare + (1 - 0.2) * mt.fare * mt.n_transfer_per_length), # additional maas operation cost * (...) monetary units per km 
@@ -81,6 +92,9 @@ def main():
         total_service_capacity_TNC=tnc.total_service_capacity,
         average_veh_travel_dist_per_day_TNC=tnc.average_veh_travel_dist_per_day,
         cost_purchasing_capacity_TNC=tnc.cost_purchasing_capacity_TNC,
+        trip_length_per_traveler_type=tnc.trip_length_per_traveler_type,
+        value_travel_time_per_traveler_type=[traveler.value_time for traveler in travelers],
+        value_waiting_time_per_traveler_type=tnc.value_waiting_time_per_traveler_type,
         detour_ratio_MT=mt.detour_ratio,
         average_speed_MT=mt.average_speed,
         transit_time_MT=mt.transit_time,
@@ -91,15 +105,6 @@ def main():
     services = [tnc, mt, maas]
 
     # --------------------------
-    # 2. Define traveler groups
-    # --------------------------
-    travelers = [
-        Travelers(number_traveler=200, trip_length=30, value_time=25, value_wait=25), # count, km, monetary unit/h, monetary unit/h
-        Travelers(number_traveler=150, trip_length=10, value_time=25, value_wait=25),
-        Travelers(number_traveler=100, trip_length=5, value_time=25, value_wait=25)
-    ]
-
-    # --------------------------
     # 3. Uniform initial allocation
     # --------------------------
     allocation = {service.name: [0] * len(travelers) for service in services}
@@ -107,13 +112,6 @@ def main():
     for type_i, traveler in enumerate(travelers):
         for service in services:
             allocation[service.name][type_i] += traveler.number_traveler / len(services)
-    
-    # Pass trip info to services (km and monetary units per time)
-    tnc.trip_length_per_traveler_type = [traveler.trip_length for traveler in travelers] 
-    tnc.value_waiting_time_per_traveler_type = [traveler.value_wait for traveler in travelers]
-    maas.trip_length_per_traveler_type = [traveler.trip_length for traveler in travelers] 
-    maas.value_travel_time_per_traveler_type = [traveler.value_time for traveler in travelers]
-    maas.value_waiting_time_per_traveler_type = [traveler.value_wait for traveler in travelers]
     
     # --------------------------
     # Storage for plotting
