@@ -1,10 +1,21 @@
-from entities import TNC, MT, MaaS, Travelers, distribute_travelers
+from entities import Service, TNC, MT, MaaS, Travelers, distribute_travelers
 import numpy as np
 import matplotlib.pyplot as plt
 
 
-def plot_total_allocations(services, allocation_history, number_days):
-    """Plot total allocations per service over time."""
+def plot_total_allocations(services: list[Service], allocation_history: dict[str, list[float]], number_days: int):
+    """
+    Description
+    - Plot total allocations per service over time.
+
+    Parameters
+    - services: list of service objects used in the simulation.
+    - allocation_history: number of travelers per service for each day (e.g. {"TNC": [10, 15, 15, ..., 15], ...}).
+    - number_days: length of the simulation (number of days).
+
+    Output
+    - Shows a plot.
+    """
     plt.figure(figsize=(8, 5))
     for service in services:
         plt.plot(range(number_days),
@@ -20,8 +31,21 @@ def plot_total_allocations(services, allocation_history, number_days):
     plt.show()
 
 
-def plot_per_type_allocations(services, allocation_by_type, travelers, number_days):
-    """Plot allocations per traveler type for each service over time."""
+def plot_per_type_allocations(services: list[Service], allocation_by_type: dict[str, list[list[float]]], travelers: list[Travelers], number_days: int):
+    """
+    Description
+    - Plot allocations per traveler type for each service over time.
+
+    Parameters
+    - services: list of service objects used in the simulation.
+    - allocation_by_type: number of travelers per service for each day split by type
+                         (e.g. {"TNC": [[10, 14, ..., 15], [2, 3, ..., 3], [2, 3, ..., 3]], ...}).
+    - travelers: list of traveler group objects used in the simulation.
+    - number_days: length of the simulation (number of days).
+
+    Output
+    - Shows a plot.
+    """
     fig, axes = plt.subplots(len(travelers), 1, figsize=(8, 4 * len(travelers)), sharex=True)
     if len(travelers) == 1:
         axes = [axes]  # Ensure iterable
@@ -152,8 +176,8 @@ def main():
     print(f"{', '.join([f'{k}: {[round(v) for v in vals]}' for k, vals in allocation.items()])}")
 
     # Plot results using helper functions
-    # plot_total_allocations(services, allocation_history, number_days)
-    # plot_per_type_allocations(services, allocation_by_type, travelers, number_days)
+    plot_total_allocations(services, allocation_history, number_days)
+    plot_per_type_allocations(services, allocation_by_type, travelers, number_days)
 
 
 if __name__ == "__main__":
