@@ -1,7 +1,7 @@
 from entities import Service, TNC, MT, MaaS, Travelers, distribute_travelers
 import numpy as np
 import matplotlib.pyplot as plt
-
+from autograd import grad
 
 def plot_total_allocations(services: list[Service], allocation_history: dict[str, list[float]], number_days: int):
     """
@@ -92,10 +92,10 @@ def main():
         total_service_capacity=32000, # in veh * km per day
         trip_length_per_traveler_type=[traveler.trip_length for traveler in travelers], # km
         value_waiting_time_per_traveler_type=[traveler.value_wait for traveler in travelers], # monetary units per time
-        cost_purchasing_capacity_TNC= 100, # monetary units per veh (MM : check this value later)
-        operating_cost= 90 # monetary units per veh (MM : check this value later)
-    )
-
+        cost_purchasing_capacity_TNC= 100.0, # monetary units per veh (MM : check this value later)
+        operating_cost= 90, # monetary units per veh (MM : check this value later)
+        lambda_T=1.0 # Lagrange multiplier for the capacity constraint [$/(veh·km)]
+    )   
     mt = MT(
         ASC=0.0, 
         fare=1, # monetary units per segment (* n_transfer_per_length (eg. 0.3) = monetary units per km)
@@ -123,7 +123,8 @@ def main():
         average_speed_MT=mt.average_speed,
         transit_time_MT=mt.transit_time,
         n_transfer_per_length_MT=mt.n_transfer_per_length,
-        cost_purchasing_capacity_MT=80 # MM : check this value later
+        cost_purchasing_capacity_MT=80, # MM : check this value later
+        lambda_M=1.0 # Lagrange multiplier for the capacity constraint [$/(veh·km)] 
         )
 
     services = [tnc, mt, maas]
@@ -164,20 +165,57 @@ def main():
                 else:
                     allocation_by_type[service.name][t_idx][day] = allocation[service.name][t_idx]
 
-        # example of objectives computation for MaaS or TNC 
+        ############################## GRADIENT VERIFICATION ######################
+        # Compute the Utility matrix
         utilities = np.ones((len(travelers), len(services)))
         for idx_m, service in enumerate(services):
             for idx_i, traveler in enumerate(travelers):
                 utilities[idx_i, idx_m] = service.compute_utility(trip_length = traveler.trip_length, value_time = traveler.value_time, value_wait = traveler.value_wait)
-        print(maas.compute_objective_function(U = utilities)) # or tnc.
-        print(maas.gradient_objective(U = utilities)) # or tnc.
+
+        # ======== TNC GRADIENTS WITH AUTOGRAD ========
+        fare_T       = tnc.fare
+        share_to_M   = tnc.capacity_ratio_to_MaaS
+        lambda_T     = tnc.lambda_T
+
+        # Gradients using autograd (one variable at a time)
+        grad_fare_T = grad(lambda f_T: tnc.compute_objective_function(utilities, f_T, share_to_M, lambda_T))(fare_T)
+        grad_share_T = grad(lambda y_T: tnc.compute_objective_function(utilities, fare_T, y_T, lambda_T))(share_to_M)
+        grad_lambda_T = grad(lambda lam_T: tnc.compute_objective_function(utilities, fare_T, share_to_M, lam_T))(lambda_T)
+        gradients_T = np.array([grad_fare_T, grad_share_T, grad_lambda_T])
+        
+        print("\nTNC GRADIENTS:")
+        print("Autograd dObj/df_T :", gradients_T[0])
+        print("Autograd dObj/dy_T :", gradients_T[1])
+        print("Autograd dObj/dλ_T :", gradients_T[2])
+        print("Manual gradient (TNC):", tnc.gradient_objective(utilities))
+
+        # ======== MAAS GRADIENTS WITH AUTOGRAD ========
+        fare_M            = maas.fare
+        purchasing_cost_M = maas.cost_purchasing_capacity_TNC
+        share_TNC_M       = maas.share_TNC
+        lambda_M          = maas.lambda_M
+
+        # Gradients using autograd (one variable at a time)
+        grad_fare_M = grad(lambda f_M:maas.compute_objective_function(utilities, f_M, purchasing_cost_M, share_TNC_M, lambda_M))(fare_M)
+        grad_purchasing_M = grad(lambda c_M:maas.compute_objective_function(utilities, fare_M, c_M, share_TNC_M, lambda_M))(purchasing_cost_M)
+        grad_share_M = grad(lambda y_M:maas.compute_objective_function(utilities, fare_M, purchasing_cost_M, y_M, lambda_M))(share_TNC_M)
+        grad_lambda_M = grad(lambda lam_M:maas.compute_objective_function(utilities, fare_M, purchasing_cost_M, share_TNC_M, lam_M))(lambda_M)
+        gradients_M = np.array([grad_fare_M,grad_purchasing_M,grad_share_M,grad_lambda_M])
+
+        print("\nMAAS GRADIENTS:")
+        print("Autograd dObj/df_M :", gradients_M[0])
+        print("Autograd dObj/dc_M :", gradients_M[1])
+        print("Autograd dObj/dy_M :", gradients_M[2])
+        print("Autograd dObj/dλ_M :", gradients_M[3])
+        print("Manual gradient (MaaS):", maas.gradient_objective(utilities))
+        ###########################################################################
 
     print("\nFinal allocation:")
     print(f"{', '.join([f'{k}: {[round(v) for v in vals]}' for k, vals in allocation.items()])}")
 
     # Plot results using helper functions
-    plot_total_allocations(services, allocation_history, number_days)
-    plot_per_type_allocations(services, allocation_by_type, travelers, number_days)
+    # plot_total_allocations(services, allocation_history, number_days)
+    # plot_per_type_allocations(services, allocation_by_type, travelers, number_days)
 
 
 if __name__ == "__main__":

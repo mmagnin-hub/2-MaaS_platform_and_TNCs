@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
-import numpy as np
+# import numpy as np
+import autograd.numpy as np
+
 
 
 # --------------------------
@@ -125,7 +127,8 @@ class TNC(Service):
         trip_length_per_traveler_type: list[float],
         value_waiting_time_per_traveler_type: list[float],
         cost_purchasing_capacity_TNC: float,
-        operating_cost: float):
+        operating_cost: float,
+        lambda_T: float):
         """
         Description
         - Initialize a TNC service model.
@@ -142,9 +145,9 @@ class TNC(Service):
         - value_waiting_time_per_traveler_type: value of waiting time in monetary unit for each traveler group stored in a list [$/hr].
         - cost_purchasing_capacity_TNC:  price per veh*km to sell it to MaaS operator [$/(veh·km)].
         - operating_cost: operating cost per capacity units [$/(veh·km)].
+        - lambda_T: Lagrange multiplier for the capacity constraint [$/(veh·km)].
 
         Attributes (initialized later)
-        - lambda_T: Lagrange multiplier for the capacity constraint [$/(veh·km)].
         - demand_per_traveler_type: dict mapping service name -> list of counts per traveler type [veh].
                                     Example: {"TNC": [n0, n1, n2], "MT": [..], "MaaS": [...]}
         - vacant_veh_available: number of vacant vehicules (dedicated to TNC) in the fleet [veh].
@@ -165,7 +168,7 @@ class TNC(Service):
         # Parameters for objective
         self.cost_purchasing_capacity_TNC = cost_purchasing_capacity_TNC         
         self.operating_cost = operating_cost   
-        self.lambda_T: float = 0      
+        self.lambda_T: float = lambda_T
         
         self.trip_length_per_traveler_type: list[float] = trip_length_per_traveler_type 
         self.demand_per_traveler_type: dict[str, list[float]] | None = None
@@ -238,7 +241,7 @@ class TNC(Service):
         )
         return ((1 - self.capacity_ratio_to_MaaS) * self.total_service_capacity - total_demand) / self.average_veh_travel_dist_per_day
     
-    def compute_objective_function(self, U: np.ndarray, service_index_T: int = 0) -> float:
+    def compute_objective_function(self, U: np.ndarray, fare, y, lambda_T, service_index_T: int = 0) -> float:
         """
         Description
         - Compute the TNC objective function (Lagrangian formulation). See calculation details in report.
@@ -246,6 +249,7 @@ class TNC(Service):
         Parameters
         - U: shape (i_types, m_services) of utility values U_im for each
             traveler type i and service m.
+        # TODO: add description for other params
         - service_index_T: index of the TNC column in U (default 0).
 
         Internal variables
@@ -269,19 +273,18 @@ class TNC(Service):
         Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0)
         P = np.exp(U)
         P /= np.sum(P, axis=1, keepdims=True)
-        P_iT = P[:, service_index_T]   # Column for TNC
-
+        P_iT = P[:, service_index_T]
         sum_l_PiT_Qi = np.sum(l * P_iT * Q)
-        sum_PiT_Qi = np.sum(P_iT * Q)
-
-        # Build 4-term objective
-        term1 = -self.fare * self.detour_ratio * sum_l_PiT_Qi
-        term2 = -self.cost_purchasing_capacity_TNC * self.capacity_ratio_to_MaaS * self.total_service_capacity
+        sum_PiT_Qi   = np.sum(P_iT * Q)
+        term1 = -fare * self.detour_ratio * sum_l_PiT_Qi
+        term2 = -self.cost_purchasing_capacity_TNC * y * self.total_service_capacity
         term3 = self.operating_cost * self.total_service_capacity
-        term4 = self.lambda_T * (self.average_veh_travel_dist_per_day * sum_PiT_Qi - (1 - self.capacity_ratio_to_MaaS) * self.total_service_capacity)
+        term4 = lambda_T * (
+            self.average_veh_travel_dist_per_day * sum_PiT_Qi -
+            (1 - y) * self.total_service_capacity
+        )
+        return term1 + term2 + term3 + term4
 
-        return float(term1 + term2 + term3 + term4)
-    
     def gradient_objective(
             self,
             U: np.ndarray,
@@ -327,6 +330,7 @@ class TNC(Service):
 
         A, s = 2.5, 0.5
         vacant = self.find_vacant_veh_available()
+
         dUdy = - np.asarray(self.value_waiting_time_per_traveler_type) * s * A * (vacant)**(-(s + 1)) * (self.total_service_capacity / self.average_veh_travel_dist_per_day)
 
         sum_l_PiT_Qi = np.sum(l * P_iT * Q)
@@ -349,7 +353,7 @@ class TNC(Service):
 
         # ========= GRAD w.r.t. λ_T ==========
         grad_lambdaT = self.average_veh_travel_dist_per_day * sum_PiT_Qi - (1 - self.capacity_ratio_to_MaaS) * self.total_service_capacity
-
+        
         return np.array([grad_fT, grad_yT, grad_lambdaT])
 
     def optimize(self):
@@ -477,7 +481,8 @@ class MaaS(Service):
             average_speed_MT: float,
             transit_time_MT: float,
             n_transfer_per_length_MT: float,
-            cost_purchasing_capacity_MT: float
+            cost_purchasing_capacity_MT: float,
+            lambda_M: float
         ):
         """
         Description  
@@ -504,9 +509,9 @@ class MaaS(Service):
         - transit_time_MT: average in-vehicle transit time in MT [hr].  
         - n_transfer_per_length_MT: number of transfers per unit trip length in MT [-/km].  
         - cost_purchasing_capacity_MT: price per capacity unit for MT service [$/(veh·km)].  # MM check that units
+        - lambda_M: Lagrange multiplier for MaaS capacity constraint [$/(veh·km)]. 
 
-        Attributes (initialized later)  
-        - lambda_M: Lagrange multiplier for MaaS capacity constraint [$/(veh·km)].  
+        Attributes (initialized later)   
         - demand_per_traveler_type: dict mapping service name → list of trip counts per traveler type [trips]. # MM : disscuss units [veh] vs [trips] 
                                     Example: {"TNC": [n0, n1, n2], "MT": [..], "MaaS": [...]}  
         - vacant_veh_available: number of vacant vehicles used for MaaS [veh].
@@ -519,7 +524,7 @@ class MaaS(Service):
         self.ASC = ASC
         self.fare = fare
         self.share_TNC = share_TNC
-        self.lambda_M = 0
+        self.lambda_M = lambda_M
         
         # TNC parameters
         self.detour_ratio_TNC = detour_ratio_TNC
@@ -615,7 +620,7 @@ class MaaS(Service):
         total_demand = self.share_TNC * np.sum(np.array(self.trip_length_per_traveler_type) * np.array(self.demand_per_traveler_type[self.name])) 
         return (self.capacity_ratio_from_TNC * self.total_service_capacity_TNC - total_demand) / self.average_veh_travel_dist_per_day_TNC
 
-    def compute_objective_function(self, U: np.ndarray, service_index_M: int = 2) -> float:
+    def compute_objective_function(self, U: np.ndarray, fare, cost_purchasing_capacity_TNC, share_TNC, lambda_M, service_index_M: int = 2) -> float:
         """
         Description
         - Compute the MaaS objective function (Lagrangian formulation). See calculation details in report.
@@ -623,6 +628,7 @@ class MaaS(Service):
         Parameters
         - U: shape (i_types, m_services) of utility values U_im for each
             traveler type i and service m.
+        # TODO: add description for other params
         - service_index_M: index of the MaaS column in U (default 2).
 
         Internal variables
@@ -644,20 +650,17 @@ class MaaS(Service):
         """
         l = np.asarray(self.trip_length_per_traveler_type)
         Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0) 
-
         P = np.exp(U)
         P /= np.sum(P, axis=1, keepdims=True)
         P_iM = P[:, service_index_M]  
-
         sum_l_PiM_Qi = np.sum(l * P_iM * Q)
         sum_PiM_Qi = np.sum(P_iM * Q)
+        term1 = -fare * sum_l_PiM_Qi
+        term2 = self.cost_purchasing_capacity_MT * (1 - share_TNC) * sum_PiM_Qi
+        term3 = cost_purchasing_capacity_TNC * self.capacity_ratio_from_TNC * self.total_service_capacity_TNC
+        term4 = lambda_M * (share_TNC * sum_PiM_Qi - self.capacity_ratio_from_TNC * self.total_service_capacity_TNC)
 
-        term1 = -self.fare * sum_l_PiM_Qi
-        term2 = self.cost_purchasing_capacity_MT * (1 - self.share_TNC) * sum_PiM_Qi
-        term3 = self.cost_purchasing_capacity_TNC * self.capacity_ratio_from_TNC * self.total_service_capacity_TNC
-        term4 = self.lambda_M * (self.share_TNC * sum_PiM_Qi - self.capacity_ratio_from_TNC * self.total_service_capacity_TNC)
-
-        return float(term1 + term2 + term3 + term4)
+        return term1 + term2 + term3 + term4
 
     def gradient_objective(
             self,
@@ -820,7 +823,7 @@ class Travelers:
         - Update self.travelers_per_service with the new simulated values. 
         '''
         self.compute_utilities(services)
-        exp_utilities = np.exp(self.utilities)
+        exp_utilities = np.exp(self.utilities) 
         probabilities = exp_utilities / np.sum(exp_utilities)
         self.travelers_per_service = probabilities * self.number_traveler
         return
