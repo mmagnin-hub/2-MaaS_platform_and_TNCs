@@ -1,5 +1,6 @@
 from entities import Service, TNC, MT, MaaS, Travelers, distribute_travelers
-import numpy as np
+# import numpy as np
+import autograd.numpy as np
 import matplotlib.pyplot as plt
 from autograd import grad
 
@@ -150,6 +151,7 @@ def main():
     # 4. Simulation loop
     # --------------------------
     for day in range(number_days):
+        print(f"\nDay {day + 1}/{number_days}")
         tnc.get_allocation(allocation)
         maas.get_allocation(allocation)
         allocation = distribute_travelers(travelers, services)
@@ -166,47 +168,27 @@ def main():
                     allocation_by_type[service.name][t_idx][day] = allocation[service.name][t_idx]
 
         ############################## GRADIENT VERIFICATION ######################
-        # Compute the Utility matrix
-        utilities = np.ones((len(travelers), len(services)))
-        for idx_m, service in enumerate(services):
-            for idx_i, traveler in enumerate(travelers):
-                utilities[idx_i, idx_m] = service.compute_utility(trip_length = traveler.trip_length, value_time = traveler.value_time, value_wait = traveler.value_wait)
-
+        utilities = []
+        for traveler in travelers:
+            row = []
+            for service in services:
+                utility = service.compute_utility(
+                    traveler.trip_length, traveler.value_time, traveler.value_wait
+                )
+                row.append(utility)  
+            utilities.append(row)
+        utilities = np.array(utilities)   
         # ======== TNC GRADIENTS WITH AUTOGRAD ========
-        fare_T       = tnc.fare
-        share_to_M   = tnc.capacity_ratio_to_MaaS
-        lambda_T     = tnc.lambda_T
+        params_T = np.array([tnc.fare, tnc.capacity_ratio_to_MaaS, tnc.lambda_T])
+        grad_tnc = grad(lambda p: tnc.compute_objective_function(p, travelers, services))(params_T)
 
-        # Gradients using autograd (one variable at a time)
-        grad_fare_T = grad(lambda f_T: tnc.compute_objective_function(utilities, f_T, share_to_M, lambda_T))(fare_T)
-        grad_share_T = grad(lambda y_T: tnc.compute_objective_function(utilities, fare_T, y_T, lambda_T))(share_to_M)
-        grad_lambda_T = grad(lambda lam_T: tnc.compute_objective_function(utilities, fare_T, share_to_M, lam_T))(lambda_T)
-        gradients_T = np.array([grad_fare_T, grad_share_T, grad_lambda_T])
-        
-        print("\nTNC GRADIENTS:")
-        print("Autograd dObj/df_T :", gradients_T[0])
-        print("Autograd dObj/dy_T :", gradients_T[1])
-        print("Autograd dObj/dλ_T :", gradients_T[2])
-        print("Manual gradient (TNC):", tnc.gradient_objective(utilities))
-
+        print("Autograd gradient (TNC):", grad_tnc)
+        print("Manual gradient (TNC):", tnc.gradient_objective(utilities, maas))
         # ======== MAAS GRADIENTS WITH AUTOGRAD ========
-        fare_M            = maas.fare
-        purchasing_cost_M = maas.cost_purchasing_capacity_TNC
-        share_TNC_M       = maas.share_TNC
-        lambda_M          = maas.lambda_M
+        params_M = np.array([maas.fare, maas.cost_purchasing_capacity_TNC, maas.share_TNC, maas.lambda_M])
+        grad_maas = grad(lambda p: maas.compute_objective_function(p, travelers, services))(params_M)
 
-        # Gradients using autograd (one variable at a time)
-        grad_fare_M = grad(lambda f_M:maas.compute_objective_function(utilities, f_M, purchasing_cost_M, share_TNC_M, lambda_M))(fare_M)
-        grad_purchasing_M = grad(lambda c_M:maas.compute_objective_function(utilities, fare_M, c_M, share_TNC_M, lambda_M))(purchasing_cost_M)
-        grad_share_M = grad(lambda y_M:maas.compute_objective_function(utilities, fare_M, purchasing_cost_M, y_M, lambda_M))(share_TNC_M)
-        grad_lambda_M = grad(lambda lam_M:maas.compute_objective_function(utilities, fare_M, purchasing_cost_M, share_TNC_M, lam_M))(lambda_M)
-        gradients_M = np.array([grad_fare_M,grad_purchasing_M,grad_share_M,grad_lambda_M])
-
-        print("\nMAAS GRADIENTS:")
-        print("Autograd dObj/df_M :", gradients_M[0])
-        print("Autograd dObj/dc_M :", gradients_M[1])
-        print("Autograd dObj/dy_M :", gradients_M[2])
-        print("Autograd dObj/dλ_M :", gradients_M[3])
+        print("Autograd gradient (MaaS):", grad_maas)
         print("Manual gradient (MaaS):", maas.gradient_objective(utilities))
         ###########################################################################
 
