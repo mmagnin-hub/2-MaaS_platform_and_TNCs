@@ -180,8 +180,8 @@ def main():
         utilities = np.array(utilities)   
         # ======== TNC GRADIENTS WITH AUTOGRAD ========
         params_T = np.array([tnc.fare, tnc.capacity_ratio_to_MaaS, tnc.lambda_T])
-        grad_tnc = grad(lambda p: tnc.compute_objective_function(p, travelers, services))(params_T)
-
+        grad_tnc = grad(lambda p: tnc.compute_objective_function(p, travelers, services))(params_T) 
+        
         print("Autograd gradient (TNC):", grad_tnc)
         print("Manual gradient (TNC):", tnc.gradient_objective(utilities, maas))
         # ======== MAAS GRADIENTS WITH AUTOGRAD ========

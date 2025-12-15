@@ -225,11 +225,6 @@ class TNC(Service):
             1e-6,
             vacant_veh_available
         ) # safer for autograd
-        # if vacant_veh_available <= 0:
-        #     # If zero or negative (not enough veh available), fall back to a tiny positive value 
-        #     # so the waiting time becomes very large and effectively deters choice.
-        #     print(f"[Warning] {self.name}: No vacant vehicles available — using minimum threshold.")
-        #     vacant_veh_available = max(self.find_vacant_veh_available(), 1e-6)
         return A * (vacant_veh_available ** (-sensitivity_param))
 
     def find_vacant_veh_available(self) -> float:
@@ -255,7 +250,9 @@ class TNC(Service):
         - Compute the TNC objective function (Lagrangian formulation). See calculation details in report.
 
         Parameters
-        # TODO: declare params, travelers, services
+        - params: list of operational variables [fare, capacity_ratio_to_MaaS, lambda_T].
+        - travelers: list of Traveler objects in the simulation.
+        - services: list of Service objects in the simulation.
         - service_index_T: index of the TNC column in U (default 0).
 
         Internal variables
@@ -281,10 +278,14 @@ class TNC(Service):
         fare0 = self.fare
         y0 = self.capacity_ratio_to_MaaS
         lam0 = self.lambda_T
+        y0_M = services[2].capacity_ratio_from_TNC
 
         # compute objective with new params
         self.fare, self.capacity_ratio_to_MaaS, self.lambda_T = params
-        U = compute_utilities(travelers, services)
+
+        services[2].capacity_ratio_from_TNC = self.capacity_ratio_to_MaaS # update MaaS capacity ratio accordingly
+
+        U = compute_utility_matrix(travelers, services)
         l = np.asarray(self.trip_length_per_traveler_type)
         Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0)
         P = np.exp(U)
@@ -304,6 +305,7 @@ class TNC(Service):
         self.fare = fare0
         self.capacity_ratio_to_MaaS = y0
         self.lambda_T = lam0
+        services[2].capacity_ratio_from_TNC = y0_M 
 
         return term1 + term2 + term3 + term4
 
@@ -321,7 +323,7 @@ class TNC(Service):
         Parameters
         - U: shape (n_types, n_services) of utility values U_im for each
             traveler type i and service m (monetary units / utility scale).
-        # TODO : declare maas
+        - maas: MaaS service object to access its find_vacant_veh_available() method.
         - service_index_T: index of the TNC column in U (default 0).
         - service_index_M: index of the MaaS column in U (default 2).
 
@@ -358,7 +360,7 @@ class TNC(Service):
         dUTdy = - np.asarray(self.value_waiting_time_per_traveler_type) * s * A * (vacant)**(-(s + 1)) * (self.total_service_capacity / self.average_veh_travel_dist_per_day)
 
 
-        vacant = maas.find_vacant_veh_available() # use MaaS vacant vehicles 
+        vacant = maas.find_vacant_veh_available() # tricks: use MaaS vacant vehicles 
         dUMdy = np.asarray(self.value_waiting_time_per_traveler_type) * s * A * (vacant)**(-(s + 1)) * (self.total_service_capacity / self.average_veh_travel_dist_per_day)
 
         sum_l_PiT_Qi = np.sum(l * P_iT * Q)
@@ -374,7 +376,7 @@ class TNC(Service):
         grad_yT = (
             -self.fare * self.detour_ratio * np.sum(l * Q * P_iT *
                 ((1 - P_iT) * dUTdy - P_iM * dUMdy))
-            - self.fare * self.total_service_capacity
+            - self.cost_purchasing_capacity_TNC * self.total_service_capacity
             + self.lambda_T * self.average_veh_travel_dist_per_day * np.sum(Q * P_iT *
                 ((1 - P_iT) * dUTdy - P_iM * dUMdy))
             + self.lambda_T * self.total_service_capacity)
@@ -632,9 +634,6 @@ class MaaS(Service):
             1e-6,
             vacant_veh_available
         ) # safer for autograd
-        # if vacant_veh_available <= 0:
-        #     print(f"[Warning] {self.name}: No vacant vehicles available — using minimum threshold.")
-        #     vacant_veh_available = max(self.find_vacant_veh_available(), 1e-6) # make it so expensive that no one will choose it 
         TNC_waiting_time = A * (vacant_veh_available ** (- sensitivity_param))
         MT_waiting_time = self.transit_time_MT * (self.n_transfer_per_length_MT * (1 - self.share_TNC) * trip_length)
         return TNC_waiting_time + MT_waiting_time
@@ -659,7 +658,9 @@ class MaaS(Service):
         - Compute the MaaS objective function (Lagrangian formulation). See calculation details in report.
 
         Parameters
-        # TODO: declare params, travelers, services
+        - params: list of operational variables [fare, cost_purchasing_capacity_TNC, share_TNC, lambda_M].
+        - travelers: list of Traveler objects in the simulation.
+        - services: list of Service objects in the simulation.
         - service_index_M: index of the MaaS column in U (default 2).
 
         Internal variables
@@ -689,7 +690,7 @@ class MaaS(Service):
 
         # compute objective with new params
         self.fare, self.cost_purchasing_capacity_TNC, self.share_TNC, self.lambda_M = params
-        U = compute_utilities(travelers, services)
+        U = compute_utility_matrix(travelers, services)
         l = np.asarray(self.trip_length_per_traveler_type)
         Q = np.sum(list(self.demand_per_traveler_type.values()), axis=0) 
         P = np.exp(U)
@@ -707,6 +708,7 @@ class MaaS(Service):
         self.cost_purchasing_capacity_TNC = cost_purchasing_capacity_TNC0
         self.share_TNC = share_TNC0
         self.lambda_M = lambda_M0
+
         return term1 + term2 + term3 + term4
 
     def gradient_objective(
@@ -902,9 +904,21 @@ def distribute_travelers(travelers: list[Travelers], services: list[Service]) ->
             allocation[service.name][type_i] += traveler.travelers_per_service[index]
     return allocation
 
-def compute_utilities(travelers: List[Travelers], services: List[Service]) -> np.ndarray:
+def compute_utility_matrix(travelers: List[Travelers], services: List[Service]) -> np.ndarray:
     """
-    TODO: doc
+    Description
+    - Compute the utility matrix U for all traveler types i and services m with an autograd-compatible numpy.
+
+    Parameters
+    - travelers: list of Traveler objects in the simulation.
+    - services: list of Service objects in the simulation.
+
+    Internal variables
+    - rows: list of lists to build the utility matrix U.
+
+    Output
+    - Returns U: shape (n_types, n_services) of utility values U_im for each
+        traveler type i and service m (monetary units / utility scale).
     """
     rows = []
     for i, traveler in enumerate(travelers):
